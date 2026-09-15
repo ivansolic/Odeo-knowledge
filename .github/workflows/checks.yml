@@ -1,0 +1,77 @@
+name: checks
+
+# Deterministic gates on every contribution. These do NOT replace maintainer review:
+# a script cannot judge whether a lesson is true or useful. They exist so that the
+# failures a script CAN catch never depend on a human noticing them.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Only knowledge/ and docs may change
+        run: |
+          # A lesson PR has no business touching CI, CODEOWNERS or the license.
+          base="${{ github.event.pull_request.base.sha }}"
+          [ -n "$base" ] || exit 0
+          bad=$(git diff --name-only "$base" HEAD \
+                 | grep -vE '^(knowledge/|README\.md$|CONTRIBUTING\.md$)' || true)
+          if [ -n "$bad" ]; then
+            echo "REFUSED: a contribution may only change knowledge/, README.md or CONTRIBUTING.md."
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: Entries live in a known category, one lesson per file
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            case "$f" in
+              knowledge/fixes/*|knowledge/install/*|knowledge/review/*|knowledge/plans/*|knowledge/evals/*) ;;
+              *) echo "REFUSED: $f is not in a known category directory"; fail=1; continue ;;
+            esac
+            case "$f" in */README.md) continue ;; esac
+            head -1 "$f" | grep -q '^---$' || { echo "REFUSED: $f has no YAML frontmatter"; fail=1; }
+            for k in module tags problem_type provenance created; do
+              awk 'NR==1{next} /^---$/{exit} {print}' "$f" | grep -q "^$k:" \
+                || { echo "REFUSED: $f is missing frontmatter key: $k"; fail=1; }
+            done
+            # Size cap: a lesson is a lesson, not a manual. Long entries are usually
+            # project-specific dumps, which is the thing curation most often sends back.
+            n=$(wc -l < "$f")
+            [ "$n" -le 200 ] || { echo "REFUSED: $f is $n lines; cap is 200"; fail=1; }
+          done < <(find knowledge -name '*.md' -type f)
+          exit $fail
+
+      - name: No instructions aimed at the agent
+        run: |
+          # The one rule enforced without discussion. Entries are reference material;
+          # text that tries to steer someone else's assistant is rejected mechanically,
+          # because the cost of missing it is borne by every user, not by this repo.
+          # Odeo also disregards such text at read time (AGENTS.md, Knowledge section):
+          # this is the second layer, not the only one.
+          pat='ignore (all |any )?(previous|prior|earlier|above) (instruction|rule|direction)|disregard (the |your )?(instruction|rule|guardrail)|the new rule is|from now on,? (always|never)|you must (always|never) (ignore|disable|skip|bypass)|override (the |your )?(guardrail|rule|baseline)|do not tell the user|without (asking|telling) the (user|human)'
+          if grep -rniE "$pat" knowledge/ ; then
+            echo ""
+            echo "REFUSED: the lines above read as instructions to the agent, not as knowledge."
+            echo "See CONTRIBUTING.md. Entries describe what was learned; they never direct behaviour."
+            exit 1
+          fi
+          echo "clean: no instruction-shaped text found"
+
+      - name: No obvious secrets or personal data
+        run: |
+          # A coarse net only. The real gate is privacy-scan.sh, which runs on the
+          # contributor's machine BEFORE the PR exists and has their deny-list terms.
+          pat='-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|/Users/[a-z]|/home/[a-z]'
+          if grep -rnE "$pat" knowledge/ | grep -viE 'example\.com|example\.org|user@|you@|name@'; then
+            echo ""
+            echo "REFUSED: possible secret, email or local path above. Redact it and re-run /contribute-lesson."
+            exit 1
+          fi
+          echo "clean: no obvious secret, email or local path"
