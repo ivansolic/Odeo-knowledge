@@ -27,6 +27,32 @@ jobs:
             exit 1
           fi
 
+      - name: Only regular markdown files under knowledge/ (allowlist, not blocklist)
+        run: |
+          # Verified hole this closes: a SYMLINK under knowledge/ escaped every content
+          # check below (the category loop used `find -type f`, and recursive grep does not
+          # follow symlinks met during recursion), while still being cloned to every user's
+          # machine, where it resolves to whatever it points at, for example a private key
+          # in the home directory, which the agent then reads as community knowledge.
+          # So the rule is an ALLOWLIST: under knowledge/, a path is either a directory or
+          # a REGULAR .md file. Anything else is refused without needing to be enumerated.
+          fail=0
+          while IFS= read -r p; do
+            [ -d "$p" ] && continue
+            if [ -L "$p" ]; then
+              echo "REFUSED: $p is a symlink. Entries must be regular files; a symlink ships"
+              echo "         to every machine and resolves to whatever it targets."
+              fail=1; continue
+            fi
+            case "$p" in *.md) ;; *) echo "REFUSED: $p is not a .md file"; fail=1 ;; esac
+          done < <(find knowledge -mindepth 1)
+          # Nothing anywhere in the repo may be a symlink, for the same reason.
+          while IFS= read -r p; do
+            echo "REFUSED: $p is a symlink"; fail=1
+          done < <(find . -path ./.git -prune -o -type l -print)
+          [ "$fail" -eq 0 ] && echo "clean: regular markdown only"
+          exit $fail
+
       - name: Entries live in a known category, one lesson per file
         run: |
           fail=0
